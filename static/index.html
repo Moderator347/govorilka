@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>📖 ЭмоЧиталка — эмоциональная озвучка книг</title>
+<style>
+:root{
+  --bg:#14101c; --panel:#1e1830; --panel2:#271f3f; --text:#ece7f5; --muted:#9d92b8;
+  --accent:#b48cff; --border:#3a2f58;
+  --neutral:#8a93a6; --happy:#ffce54; --sad:#5aa9ff; --angry:#ff6b5e; --fear:#b06bff;
+  --excited:#ff9d3d; --tender:#ff8fbF; --mysterious:#4fd6be; --heroic:#ffd166; --ironic:#c0f56b;
+}
+*{box-sizing:border-box}
+body{margin:0;font-family:'Segoe UI',system-ui,sans-serif;background:
+ radial-gradient(1200px 600px at 80% -10%, #2b1d4d 0%, transparent 60%),
+ radial-gradient(900px 500px at -10% 110%, #1d2b4d 0%, transparent 55%), var(--bg);
+ color:var(--text);min-height:100vh}
+header{display:flex;align-items:center;gap:12px;padding:14px 22px;border-bottom:1px solid var(--border)}
+header h1{font-size:20px;margin:0;font-weight:600}
+header .sub{color:var(--muted);font-size:13px}
+main{display:grid;grid-template-columns:320px 1fr;gap:18px;padding:18px 22px;max-width:1400px;margin:0 auto}
+@media(max-width:900px){main{grid-template-columns:1fr}}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px}
+.panel h2{margin:0 0 10px;font-size:15px;color:var(--accent);text-transform:uppercase;letter-spacing:.6px}
+/* upload */
+.drop{border:2px dashed var(--border);border-radius:12px;padding:22px;text-align:center;cursor:pointer;transition:.2s;color:var(--muted)}
+.drop.hover,.drop:hover{border-color:var(--accent);color:var(--text);background:var(--panel2)}
+.drop input{display:none}
+progress{width:100%;height:8px;border-radius:4px;appearance:none;margin-top:8px}
+progress::-webkit-progress-bar{background:var(--panel2);border-radius:4px}
+progress::-webkit-progress-value{background:linear-gradient(90deg,var(--accent),#6bd6ff);border-radius:4px}
+/* library */
+.book-item{padding:10px 12px;border-radius:10px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;align-items:center;margin-top:6px;border:1px solid transparent}
+.book-item:hover{background:var(--panel2)}
+.book-item.active{background:var(--panel2);border-color:var(--accent)}
+.book-item .t{font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.book-item .a{font-size:12px;color:var(--muted)}
+.badge-status{font-size:11px;padding:2px 8px;border-radius:10px;background:var(--panel);border:1px solid var(--border);white-space:nowrap}
+.del{opacity:.5;cursor:pointer;font-size:14px}.del:hover{opacity:1;color:var(--angry)}
+/* reader */
+#reader{display:flex;flex-direction:column;gap:14px}
+.now-playing{position:relative;overflow:hidden}
+.np-emotion-bg{position:absolute;inset:0;opacity:.14;transition:background .6s;pointer-events:none;border-radius:14px}
+.np-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:4px 12px;border-radius:20px;font-size:13px;font-weight:600;color:#14101c}
+.chip::before{content:"";width:9px;height:9px;border-radius:50%;background:rgba(0,0,0,.35)}
+.np-chapter{color:var(--muted);font-size:13px}
+.np-text{font-size:19px;line-height:1.65;margin:14px 0;min-height:66px;font-family:Georgia,'Times New Roman',serif}
+.np-reason{font-size:12px;color:var(--muted);font-style:italic}
+.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+button.ctrl{background:var(--panel2);border:1px solid var(--border);color:var(--text);border-radius:10px;padding:9px 14px;font-size:15px;cursor:pointer;transition:.15s}
+button.ctrl:hover{border-color:var(--accent);transform:translateY(-1px)}
+button.ctrl.primary{background:linear-gradient(135deg,#7b5cff,#b48cff);border:none;font-weight:700;padding:9px 22px}
+.speed{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+input[type=range]{accent-color:var(--accent)}
+/* passage list */
+#passages{max-height:46vh;overflow-y:auto;display:flex;flex-direction:column;gap:6px;padding-right:4px}
+.passage{display:flex;gap:10px;padding:9px 12px;border-radius:10px;border:1px solid transparent;cursor:pointer;font-size:14px;line-height:1.5;align-items:flex-start}
+.passage:hover{background:var(--panel2)}
+.passage.current{background:var(--panel2);border-color:var(--accent)}
+.passage.pending{opacity:.45}
+.pdot{width:11px;height:11px;border-radius:50%;margin-top:5px;flex:none;background:var(--neutral)}
+.ptxt{flex:1}
+.pemo{font-size:11px;color:var(--muted);white-space:nowrap;margin-top:2px}
+.empty{color:var(--muted);text-align:center;padding:40px 10px;font-size:15px}
+.err{color:var(--angry);font-size:13px;margin-top:8px}
+::-webkit-scrollbar{width:9px}::-webkit-scrollbar-thumb{background:var(--border);border-radius:5px}
+footer{text-align:center;color:var(--muted);font-size:12px;padding:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>📖 ЭмоЧиталка</h1>
+  <span class="sub">электронные книги, озвученные с эмоциями — текст анализируется, голос меняется: радость, грусть, гнев, страх, таинственность…</span>
+</header>
+
+<main>
+  <div style="display:flex;flex-direction:column;gap:18px">
+    <section class="panel">
+      <h2>Загрузить книгу</h2>
+      <label class="drop" id="drop">
+        <div>📚 Перетащите файл сюда<br><small>EPUB · FB2 · TXT · MD · HTML</small></div>
+        <input type="file" id="file" accept=".epub,.fb2,.txt,.md,.html,.htm">
+      </label>
+      <progress id="upbar" max="100" value="0" hidden></progress>
+      <div class="err" id="uperr"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Библиотека</h2>
+      <div id="library"><div class="empty">Пока пусто — загрузите книгу</div></div>
+    </section>
+  </div>
+
+  <section class="panel" id="readerPanel">
+    <h2>Читалка</h2>
+    <div id="reader"><div class="empty">Выберите книгу из библиотеки слева 🎧</div></div>
+  </section>
+</main>
+<footer>локальный нейросинтез речи Piper + эмоционаная просодия · FastAPI</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
