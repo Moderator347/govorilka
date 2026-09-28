@@ -134,11 +134,27 @@ def book_json(st: BookState) -> dict:
 # ---------------------------------------------------------------------------
 import io  # noqa: E402
 
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
+
 
 def _process_book_safe(st: BookState):
-    """Run synthesis; on any failure mark error but keep partial results."""
+    """Run synthesis; on any failure mark error but keep partial results.
+
+    Memory guards: the whole pipeline runs in a single worker thread, one
+    passage at a time, and transient buffers are freed after each passage so
+    that long "sad" (slow + tremolo) fragments can't pile up memory and get
+    the process OOM-killed (exit code 137).
+    """
     try:
         _process_book_inner(st)
+    except MemoryError as e:
+        log.exception("processing ran out of memory")
+        st.status = "error"
+        st.error = ("Недостаточно памяти для озвучки. Уменьшите MAX_PASSAGES "
+                    "или разбейте книгу на части.")
+        st.save_meta()
     except Exception as e:
         log.exception("processing failed")
         st.status = "error"
@@ -164,6 +180,7 @@ def _process_book_inner(st: BookState):
         p.reason = prof.reason
         p.audio = out_name
         p.duration = _wav_duration(wav_bytes)
+        del wav_bytes                          # free audio buffer promptly
         st.progress = (p.index + 1) / total
         if p.index % 5 == 0 or p.index == total - 1:
             st.save_meta()
@@ -228,7 +245,9 @@ async def upload_book(file: UploadFile = File(...)):
     st.status = "processing"
     REGISTRY[bid] = st
 
-    asyncio.get_running_loop().run_in_executor(None, _process_book_safe, st)
+    # Single shared worker thread: books are processed one at a time so that
+    # concurrent uploads can't multiply memory usage (OOM guard).
+    _EXECUTOR.submit(_process_book_safe, st)
     return book_json(st)
 
 
