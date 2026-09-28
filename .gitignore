@@ -1,6 +1,1 @@
-# Python compiled files
-__pycache__/
-*.pyc
-
-# Model artifacts (binary/generated)
-models/*.onnx
+(empty)
