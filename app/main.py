@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import books as books_mod
 from .emotion import analyze, EMOTIONS
-from .tts import synthesize_emotional
+from .tts import synthesize_emotional, get_voice
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -155,10 +155,6 @@ def book_json(st: BookState) -> dict:
 # ---------------------------------------------------------------------------
 # Processing pipeline (analyze + synthesize sequentially in a worker thread)
 # ---------------------------------------------------------------------------
-from concurrent.futures import ThreadPoolExecutor  # noqa: E402
-
-_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
-
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
@@ -519,6 +515,22 @@ def emotions():
 def _startup():
     load_existing_books()
     log.info("loaded %d existing books", len(REGISTRY))
+    # Pre-warm the default (Russian) voice so the first book doesn't wait
+    # for model download/load, and surface config errors early in the log.
+    def _warm():
+        try:
+            get_voice()
+            log.info("голос по умолчанию готов (русский): %s",
+                     os.environ.get("PIPER_VOICE", "ru_RU-denis-medium"))
+        except Exception:
+            log.exception("не удалось подготовить голос - озвучка будет недоступна, "
+                          "пока модель не появится в каталоге models/")
+    _EXECUTOR.submit(_warm)
+
+
+@app.on_event("shutdown")
+def _shutdown():
+    _EXECUTOR.shutdown(wait=False)
 
 
 # static frontend last so /api/* wins

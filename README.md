@@ -47,14 +47,20 @@
 ```bash
 pip install -r requirements.txt
 
-# Если весов модели нет — скачайте голос Piper:
-mkdir -p models && cd models
-wget https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx
-wget "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json?filename=en_US-lessac-medium.onnx.json"
-cd ..
+# Голос не скачивать заранее — по умолчанию используется русский
+# ru_RU-denis-medium, и при первом запуске он автоматически загружается
+# в каталог models/ (нужен доступ к huggingface.co).
 
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 # откройте http://localhost:8000
+```
+
+Другой голос (в т.ч. женский русский):
+
+```bash
+PIPER_VOICE=ru_RU-tatyana-shcherbitskaya-medium uvicorn app.main:app
+# или путь к локальному файлу модели:
+PIPER_VOICE=models/ru_RU-dmitri-medium.onnx uvicorn app.main:app
 ```
 
 ## Структура проекта
@@ -85,7 +91,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `PIPER_MODEL` | `models/en_US-lessac-medium.onnx` | путь к голосу Piper |
+| `PIPER_VOICE` | `ru_RU-denis-medium` | голос Piper: имя модели (скачается автоматически в `models/`) или путь к файлу `.onnx` |
 | `MAX_UPLOAD_MB` | `60` | лимит размера загрузки |
 | `MAX_PASSAGES` | `400` | максимум озвучиваемых фрагментов на книгу |
 | `EMOTION_API_KEY` | — | ключ OpenAI-совместимого API для LLM-анализа эмоций |
@@ -116,14 +122,15 @@ OOM-kill процесса).
 
 ## Известные ограничения
 
-- Базовый голос говорит **по-английски** (en_US-lessac). Русский текст будет
-  прочитан транслитерацией — для русского подключите русскую модель Piper
-  (например, `ru_RU-midia-medium`) через `PIPER_MODEL`.
-- Лексикон эмоций англоязычный; для точного анализа русской прозы включите
-  LLM-режим (`EMOTION_API_KEY`).
-- Первый запрос после старта медленнее — лениво загружается ONNX-модель.
+- Голос по умолчанию — **русский** (`ru_RU-denis-medium`, мужской). Модель
+  подхватывается автоматически: если её нет в `models/`, она скачивается с
+  HuggingFace при первом запуске. Другие голоса — `PIPER_VOICE=ru_RU-dmitri-medium`,
+  `PIPER_VOICE=ru_RU-tatyana-shcherbitskaya-medium` и т.д.
+- Эмоциональный анализ работает на русском лексиконе (кроме LLM-режима).
+- Первый запрос после старта медленнее — лениво загружается ONNX-модель
+  (на старте сервера голос прогревается в фоновом потоке).
 
 ## Лицензии
 
-Модель голоса — MIT (rhasspy/piper-voices). Библиотеки имеют собственные
+Модели голосов — MIT/CC-BY (rhasspy/piper-voices). Библиотеки имеют собственные
 лицензии (FastAPI — MIT, piper-tts — GPL-3.0 и т.д.).
