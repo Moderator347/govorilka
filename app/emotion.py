@@ -69,12 +69,64 @@ _add("said says replied answered asked shouted whispered exclaimed muttered"
      " cried laughed smiled frowned",
      )  # dialogue verbs are handled separately
 
-CAPITAL_WORD = re.compile(r"\b[A-Z]{3,}\b")
+# ---------------------------------------------------------------------------
+# Russian lexicons (word stems are matched by prefix, so any case/ending works)
+# ---------------------------------------------------------------------------
+RU_LEX: dict[str, list[str]] = {}
+
+
+def _add_ru(stems: str, *emos: str) -> None:
+    for w in stems.split():
+        RU_LEX.setdefault(w, []).extend(emos)
+
+
+_add_ru("радост счастл весел улыбк смех смея смеёт хохоч лику восторг чудесн"
+        " прекрасн замечательн любим люблю любовь ласк нежн праздн красота"
+        " солнц светл надежд мечты мечта радость",
+        "happy", "tender")
+_add_ru("волнова возбужд трепет адреналин ура удивительн невероятн"
+        " триумф побед выиграл фейерверк спешк нетерпен",
+        "excited", "happy")
+_add_ru("грустн печал тоск плак слез уныл меланхоли одинок одиночеств"
+        " покинут горев скорб потер прощай прощан расставан депресс"
+        " оплакив утрат безутешн",
+        "sad")
+_add_ru("злост гнев гневу разгнева взбешен бешен ярост ненавиж ненавист презир"
+        " крича крикнул кричит орал рычал руга проклять черт дьявол злобн",
+        "angry")
+_add_ru("страшн страх испуг боюсь боязнь ужас паник",
+        "fear", "mysterious")
+_add_ru("таинствен тайн секрет странн необычн шёпот шепот туман полночь"
+        " мрак ночн призрачн неизвестн загадк исчез молча тихо тишин",
+        "mysterious")
+_add_ru("храбр герой героич мужеств отвага доблест стоек стойк"
+        " сражался битв воин сил могуч боролся защищал клятв долг жертв",
+        "heroic")
+_add_ru("мило нежно целов обним ласков родн мам пап ребёнок малыш колыбельн"
+        " тепл обнимал прижался лобыз",
+        "tender")
+_add_ru("наивно иронич саркам насмешл издеват шутк ирония",
+        "ironic")
+
+CAPITAL_WORD = re.compile(r"\b[A-ZА-Я]{3,}\b")
 EXCLAIM = re.compile(r"[!！]{1,}")
 QUESTION = re.compile(r"[?？]")
 ELLIPSIS = re.compile(r"\.{3}|…")
 ALLCAPS_SENT = re.compile(r"^[^a-zа-я]*[A-ZА-Я]{2,}[^a-zа-я]*$")
 DIALOGUE = re.compile(r"[\"“»«].+?[\"”»«]")
+
+
+def _lex_score(tok: str) -> list[str]:
+    """Emotion votes for a token: exact match in English lexicon,
+    longest-prefix match in the Russian stem lexicon."""
+    emo = LEX.get(tok)
+    if emo:
+        return emo
+    best_key, best_len = "", 0
+    for stem in RU_LEX:
+        if tok.startswith(stem) and len(stem) > best_len:
+            best_key, best_len = stem, len(stem)
+    return RU_LEX.get(best_key, ())
 
 
 @dataclass
@@ -119,7 +171,7 @@ def analyze_rules(text: str, prev_emotion: str | None = None) -> EmotionProfile:
     n = max(len(toks), 1)
 
     for t in toks:
-        for emo in LEX.get(t, ()):  # type: ignore[arg-type]
+        for emo in _lex_score(t):  # exact EN match or RU stem prefix match
             scores[emo] += 1.0
     lex_hits = sum(scores[e] for e in EMOTIONS) - 0.15 * len(EMOTIONS)
 
@@ -164,7 +216,7 @@ def analyze_rules(text: str, prev_emotion: str | None = None) -> EmotionProfile:
 
     reasons = []
     if lex_hits >= 0.5:
-        top_words = [t for t in toks if t in LEX][:4]
+        top_words = [t for t in toks if _lex_score(t)][:4]
         reasons.append("лексика: " + ", ".join(top_words))
     if EXCLAIM.search(text):
         reasons.append("восклицания")
