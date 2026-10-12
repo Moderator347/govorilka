@@ -142,13 +142,22 @@ function renderReader() {
        <div class="speed" style="margin-left:auto">скорость
          <input type="range" id="rate" min="0.6" max="1.6" step="0.05" value="1">
          <span id="ratev">1.0×</span></div>
-       <a class="ctrl" id="dlmp3" style="text-decoration:none" title="Скачать всю книгу одним MP3-файлом">⬇ MP3</a>
+       <a class="ctrl" id="dlmp3" style="text-decoration:none" title="Скачать всю озвучку одним MP3-файлом">⬇ Экспорт озвучки (MP3)</a>
      </div>
      <progress id="genbar" max="100" value="0" style="margin-top:10px"></progress>
    </div>
    <div id="passages"></div>`;
   $("#playpause").onclick = togglePlay;
-  $("#dlmp3").href = `/api/books/${current.id}/download`;
+  const dl = $("#dlmp3");
+  dl.href = `/api/books/${current.id}/download`;
+  dl.setAttribute("download", "");
+  dl.onclick = (e) => {
+    if (readyCount(current) === 0) {
+      e.preventDefault();
+      alert("Озвучка ещё не готова — дождитесь появления первого фрагмента.");
+    }
+  };
+  updateExportButton();
   $("#prev").onclick = () => jump(-1);
   $("#next").onclick = () => jump(+1);
   $("#rate").oninput = e => { audio.playbackRate = +e.target.value; $("#ratev").textContent = (+e.target.value).toFixed(1) + "×"; };
@@ -163,6 +172,23 @@ function updateProgressUI() {
   bar.value = Math.round(done / total * 100);
   bar.title = `Озвучено ${done} из ${total}`;
   if (done === total) bar.style.display = "none";
+  updateExportButton();
+}
+
+function updateExportButton() {
+  const dl = $("#dlmp3"); if (!dl || !current) return;
+  const done = readyCount(current), total = current.passages.length;
+  if (done === 0) {
+    dl.textContent = "⬇ Экспорт озвучки (MP3)";
+    dl.title = "Озвучка ещё не готова";
+    dl.style.opacity = "0.45";
+  } else {
+    dl.textContent = "⬇ Экспорт озвучки (MP3)";
+    dl.title = done < total
+      ? `Скачать всю озвучку одним MP3-файлом (${done} из ${total} фрагментов готово)`
+      : "Скачать всю озвучку одним MP3-файлом";
+    dl.style.opacity = "";
+  }
 }
 
 function rerenderPassageList() {

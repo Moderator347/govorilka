@@ -92,6 +92,15 @@ class BookState:
                 return path
         return None
 
+    def export_stamp(self) -> float:
+        """Latest mtime among the per-passage clips (used to invalidate full.mp3)."""
+        mt = 0.0
+        for i in range(len(self.book.passages)):
+            path = self.audio_file(i)
+            if path is not None:
+                mt = max(mt, path.stat().st_mtime)
+        return mt
+
     def save_meta(self):
         metas = []
         for p in self.book.passages:
@@ -394,19 +403,31 @@ def get_audio(book_id: str, index: int):
 
 @app.get("/api/books/{book_id}/download")
 def download_book_mp3(book_id: str):
-    """Export the whole book as a single continuous MP3 file."""
+    """Export the whole narration as a single continuous MP3 file.
+
+    All synthesized passages are stitched together in book order into one
+    audio file (no per-fragment downloads needed). The result is cached as
+    ``full.mp3`` next to the clips and rebuilt automatically whenever new
+    passage audio appears (e.g. while the book is still being voiced).
+    """
     st = get_state(book_id)
     paths = [st.audio_file(i) for i in range(len(st.book.passages))]
     paths = [p for p in paths if p is not None]
     if not paths:
         raise HTTPException(425, "Аудио ещё не готово")
 
-    # cache the assembled export next to the clips
+    # cache the assembled export next to the clips; rebuild it when any clip
+    # is newer than the cached export (partial books keep growing)
     out = st.dir / "full.mp3"
-    ready_sec = sum(getattr(p, "duration", 0.0) for p in st.book.passages
-                    if st.audio_file(p.index) is not None)
-    expected_lo = ready_sec * int(MP3_BITRATE.rstrip("k")) * 125 * 0.8   # -20% slack
-    if not (out.exists() and out.stat().st_size >= max(expected_lo, 1024)):
+    stamp = st.export_stamp()
+    cache_ok = False
+    try:
+        cache_ok = (out.exists()
+                    and out.stat().st_mtime >= stamp
+                    and out.stat().st_size > 1024)
+    except OSError:
+        pass
+    if not cache_ok:
         tmp = out.with_suffix(".part.mp3")
         try:
             _concat_mp3(paths, tmp)
@@ -414,7 +435,7 @@ def download_book_mp3(book_id: str):
         except Exception:
             log.exception("full-book mp3 export failed")
             if tmp.exists():
-                tmp.unlink()
+                tmp.unlink(missing_ok=True)
             # fall back to zipping individual clips
             zip_path = st.dir / "full.zip"
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
@@ -488,8 +509,34 @@ def _first_sync(data: bytes) -> int:
     return i
 
 
+def _concat_mp3_ffmpeg(paths: list[Path], out_path: Path) -> None:
+    """Decode every clip to PCM and re-encode as one seamless MP3 via ffmpeg.
+
+    Handles clips with different sample rates/bitrates (e.g. .wav fallbacks)
+    and produces an exact-duration continuous file.
+    """
+    args = ["ffmpeg", "-y", "-loglevel", "error"]
+    for p in paths:
+        args += ["-i", str(p)]
+    inputs = " ".join(f"[{i}:a]" for i in range(len(paths)))
+    args += ["-filter_complex", f"{inputs}concat=n={len(paths)}:v=0:a=1[a]",
+             "-map", "[a]", "-c:a", "libmp3lame", "-b:a", MP3_BITRATE, str(out_path)]
+    r = subprocess.run(args, capture_output=True, timeout=1800)
+    if r.returncode != 0 or not out_path.exists():
+        raise RuntimeError("ffmpeg concat failed: " + r.stderr.decode(errors="replace")[:300])
+
+
 def _concat_mp3(paths: list[Path], out_path: Path) -> None:
-    """Concatenate mono 48k MP3 clips into one MP3 (byte-level frame copy)."""
+    """Merge all passage clips into a single continuous MP3 file."""
+    if _have_ffmpeg():
+        try:
+            _concat_mp3_ffmpeg(paths, out_path)
+            return
+        except Exception:
+            log.warning("ffmpeg concat failed, falling back to byte-level join",
+                        exc_info=True)
+    # fallback: byte-level MPEG frame concatenation (all clips share the
+    # same encoder settings, so raw frames play back fine)
     with open(out_path, "wb") as out:
         for p in paths:
             data = p.read_bytes()

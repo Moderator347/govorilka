@@ -81,6 +81,8 @@ PIPER_VOICE=models/ru_RU-dmitri-medium.onnx uvicorn app.main:app
 - `GET /api/books` — список книг со статусами/прогрессом
 - `GET /api/books/{id}` — книга, фрагменты, эмоции, готовность аудио
 - `GET /api/books/{id}/audio/{index}` — MP3 фрагмента (`425`, если ещё не готов)
+- `GET /api/books/{id}/download` — **вся озвучка одним MP3-файлом** (фрагменты
+  склеиваются в порядке книги; кнопка «⬇ Экспорт озвучки (MP3)» в плеере)
 - `DELETE /api/books/{id}` — удалить книгу
 - `GET /api/emotions` — список эмоций
 
