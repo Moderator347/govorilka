@@ -415,6 +415,8 @@ def download_book_mp3(book_id: str):
     paths = [p for p in paths if p is not None]
     if not paths:
         raise HTTPException(425, "Аудио ещё не готово")
+    # download name = book title (never a fragment name / generic placeholder)
+    ascii_stem, uni_stem = _export_filenames(st)
 
     # cache the assembled export next to the clips; rebuild it when any clip
     # is newer than the cached export (partial books keep growing)
@@ -441,17 +443,86 @@ def download_book_mp3(book_id: str):
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
                 for p in paths:
                     z.write(p, p.name)
-            return _attachment(zip_path, _safe_filename(st.book.title) + ".zip",
-                               "application/zip")
+            return _attachment(zip_path, ascii_stem + ".zip",
+                               "application/zip", uni_stem + ".zip")
 
-    return _attachment(out, _safe_filename(st.book.title) + ".mp3", "audio/mpeg")
+    return _attachment(out, ascii_stem + ".mp3", "audio/mpeg", uni_stem + ".mp3")
 
 
 def _safe_filename(title: str) -> str:
-    """ASCII-safe download name via romanization (RFC 5987 carries the unicode one)."""
-    name = re.sub(r"[^\w\s\-]", "", title, flags=re.UNICODE).strip()
-    name = re.sub(r"\s+", "_", name)[:80] or "book"
+    """ASCII-safe download name derived from the *book title*.
+
+    The exported narration must be named after the book itself - never after
+    a passage/fragment (e.g. ``p0012.mp3``) and never a generic placeholder
+    like ``full``. Cyrillic titles are transliterated for the ASCII fallback;
+    the exact unicode name travels in ``filename*`` (_content_disposition).
+    Returns "" when the title carries no usable name.
+    """
+    name = str(title or "").strip()
+    if not name or name.lower() == "untitled":
+        return ""
+    name = re.sub(r"[^\w\s\-]", "", name, flags=re.UNICODE).strip()
+    name = re.sub(r"\s+", "_", name)[:80]
     return _romanize(name)
+
+
+def _unicode_filename(title: str) -> str:
+    """Original-alphabet file stem for RFC 5987 ``filename*`` (keeps Cyrillic)."""
+    name = str(title or "").strip()
+    if not name or name.lower() == "untitled":
+        return ""
+    name = re.sub(r"[^\w\s\-]", "", name, flags=re.UNICODE).strip()
+    return re.sub(r"\s+", "_", name)[:80]
+
+
+def _export_filenames(st: "BookState") -> tuple[str, str]:
+    """(ascii_stem, unicode_stem) for the whole-narration export file.
+
+    Always derived from the book title - never from a fragment/passage file
+    name and never a generic placeholder like ``full``. If the recorded title
+    is unusable, fall back to the first line of the source book (a plain
+    title line, not a ``Chapter N.`` heading), then to the upload's original
+    file name, and only as a last resort to the book id.
+    """
+    uni = _unicode_filename(st.book.title)
+    base = _safe_filename(st.book.title)
+    if base:
+        return base, (uni or base)
+    try:
+        src = next((p for p in st.dir.glob("source*") if p.is_file()), None)
+        if src is not None:
+            raw = src.read_bytes()[:4096]
+            for enc in ("utf-8", "cp1251", "latin-1"):
+                try:
+                    text = raw.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                text = raw.decode("utf-8", "ignore")
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if lines:
+                first = lines[0][:80]
+                cleaned = books_mod._strip_title_prefix(first)[:80]
+                # a bare chapter heading names a fragment, not the book
+                if cleaned.lower() != first.lower():
+                    cleaned = ""
+                base = _safe_filename(cleaned)
+                uni = _unicode_filename(cleaned)
+            if not base:  # first line useless -> original upload file name
+                orig = re.sub(r"^source", "", src.stem) if src else ""
+                base = _safe_filename(orig)
+                uni = _unicode_filename(orig)
+    except Exception:
+        log.exception("export filename fallback failed")
+    if not base:
+        base = uni = st.book.id
+    return base, (uni or base)
+
+
+def _export_filename(st: "BookState") -> str:
+    """ASCII stem of the export file (kept for tests/back-compat)."""
+    return _export_filenames(st)[0]
 
 
 # Cyrillic -> Latin transliteration table (for HTTP fallback filenames)
@@ -464,34 +535,38 @@ _CONS = {"б": "b", "в": "v", "г": "g", "д": "d", "ж": "zh", "з": "z",
 
 
 def _romanize(text: str) -> str:
+    """Transliterate Cyrillic to Latin, preserving the original letter case."""
     out = []
-    for ch in text.lower():
-        if ch in _VOWELS:
-            out.append(_VOWELS[ch])
-        elif ch in _CONS:
-            out.append(_CONS[ch])
+    for ch in text:
+        low = ch.lower()
+        if low in _VOWELS or low in _CONS:
+            r = _VOWELS.get(low) or _CONS.get(low)
+            out.append(r.upper() if ch.isupper() else r)
         else:
             out.append(ch)
     s = "".join(out)
     s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
-    return s or "book"
+    return s
 
 
-def _content_disposition(filename: str) -> str:
+def _content_disposition(filename: str, unicode_name: str = "") -> str:
     """RFC 5987 Content-Disposition value safe for non-latin (Cyrillic) names.
 
     HTTP headers are encoded as latin-1, so raw Cyrillic filenames raise
     UnicodeEncodeError inside starlette. We provide an ASCII fallback plus
-    the UTF-8 percent-encoded name in filename*.
+    the UTF-8 percent-encoded name in filename* (``unicode_name`` carries the
+    original-alphabet name when ``filename`` is its romanized ASCII form).
     """
     ascii_name = filename.encode("ascii", "ignore").decode() or "book"
-    quoted = urllib.parse.quote(filename, safe="")
+    quoted = urllib.parse.quote(unicode_name or filename, safe="")
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
 
 
-def _attachment(path: Path, filename: str, media_type: str) -> FileResponse:
+def _attachment(path: Path, filename: str, media_type: str,
+                unicode_name: str = "") -> FileResponse:
     return FileResponse(path, media_type=media_type,
-                        headers={"Content-Disposition": _content_disposition(filename)})
+                        headers={"Content-Disposition":
+                                 _content_disposition(filename, unicode_name)})
 
 
 def _first_sync(data: bytes) -> int:

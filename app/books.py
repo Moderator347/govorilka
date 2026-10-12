@@ -115,6 +115,23 @@ def parse_fb2(path: str) -> tuple[str, str, str, list[str]]:
     return title, author, lang, chapters
 
 
+def _strip_title_prefix(line: str) -> str:
+    """Drop a leading chapter/part numbering from a book's first line.
+
+    ``"Chapter 1. A Wonderful Morning"`` -> ``"A Wonderful Morning"``,
+    ``"Часть 2. Весна"`` -> ``"Весна"``. Used so the *book* title never
+    carries a single-chapter prefix (which would also end up as the
+    exported audio file name).
+    """
+    m = re.match(
+        r"(?i)^\s*(?:глава|часть|chapter|part|книга|book|том|volume|prologue|"
+        r"epilogue|пролог|эпилог)\s*"
+        r"(?:[IVXLCDM]+|\d+|[一二三四五六七八九十百]+)?\s*[.:、—–-]*\s*",
+        line)
+    rest = line[m.end():].strip() if m else ""
+    return rest or line.strip()
+
+
 def parse_txt(path: str) -> tuple[str, str, str, list[str]]:
     raw = open(path, "rb").read()
     for enc in ("utf-8", "cp1251", "latin-1"):
@@ -130,9 +147,17 @@ def parse_txt(path: str) -> tuple[str, str, str, list[str]]:
     # split on empty lines / chapter headings
     parts = re.split(r"\n\s*\n(?=\s*(?:Глава|Chapter|CHAPTER|Part|#|\d+\.)|\s*$)", text)
     parts = [p.strip() for p in parts if len(re.sub(r"\W", "", p)) > 40]
-    title = os.path.splitext(os.path.basename(path))[0]
-    first_line = text.strip().splitlines()[0][:80] if text.strip() else title
-    return first_line or title, "", lang, parts or [text]
+    filename_title = os.path.splitext(os.path.basename(path))[0]
+    # Book title: prefer a meaningful first line (without any "Chapter N."
+    # prefix); fall back to the file name when the first line is itself just
+    # a heading that matches the file name.
+    first_line = text.strip().splitlines()[0].strip() if text.strip() else ""
+    cleaned = _strip_title_prefix(first_line)
+    if not cleaned or cleaned.lower() == filename_title.lower():
+        title = filename_title
+    else:
+        title = cleaned[:80]
+    return title, "", lang, parts or [text]
 
 
 # ---------------------------------------------------------------------------
