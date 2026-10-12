@@ -82,14 +82,15 @@ def _add_ru(stems: str, *emos: str) -> None:
 
 _add_ru("радост счастл весел улыбк смех смея смеёт хохоч лику восторг чудесн"
         " прекрасн замечательн любим люблю любовь ласк нежн праздн красота"
-        " солнц светл надежд мечты мечта радость",
+        " солнц светл надежд мечты мечта радость хорошо хорон",
         "happy", "tender")
 _add_ru("волнова возбужд трепет адреналин ура удивительн невероятн"
         " триумф побед выиграл фейерверк спешк нетерпен",
         "excited", "happy")
-_add_ru("грустн печал тоск плак слез уныл меланхоли одинок одиночеств"
-        " покинут горев скорб потер прощай прощан расставан депресс"
-        " оплакив утрат безутешн",
+_add_ru("грустн печал тоск плакал плачет плачут заплак слез уныл меланхоли"
+        " одинок одиночеств покинут горевал горюет скорб потер потерял"
+        " прощай прощан расставан депресс оплакив утрат безутешн"
+        " умер смерт похорон мёртв мертв",
         "sad")
 _add_ru("злост гнев гневу разгнева взбешен бешен ярост ненавиж ненавист презир"
         " крича крикнул кричит орал рычал руга проклять черт дьявол злобн",
@@ -97,16 +98,41 @@ _add_ru("злост гнев гневу разгнева взбешен беше
 _add_ru("страшн страх испуг боюсь боязнь ужас паник",
         "fear", "mysterious")
 _add_ru("таинствен тайн секрет странн необычн шёпот шепот туман полночь"
-        " мрак ночн призрачн неизвестн загадк исчез молча тихо тишин",
+        " мрак призрачн неизвестн загадк исчез",
         "mysterious")
+_add_ru("тихо тишин молча молчал",
+        "mysterious", "tender")
 _add_ru("храбр герой героич мужеств отвага доблест стоек стойк"
         " сражался битв воин сил могуч боролся защищал клятв долг жертв",
         "heroic")
-_add_ru("мило нежно целов обним ласков родн мам пап ребёнок малыш колыбельн"
+_add_ru("мило целов обним родн мам пап ребёнок малыш колыбельн"
         " тепл обнимал прижался лобыз",
         "tender")
 _add_ru("наивно иронич саркам насмешл издеват шутк ирония",
         "ironic")
+
+# Multi-word phrases ("больше не было") -> emotion votes. Words are joined
+# with "_" inside a phrase entry; several alternative phrases separated by "|".
+RU_PHRASES: list[tuple[re.Pattern, list[str]]] = []
+
+
+def _add_ru_phrase(entries: str, *emos: str) -> None:
+    for entry in entries.split():
+        for alt in entry.split("|"):
+            words = alt.split("_")
+            pat = re.compile(
+                r"\b" + r"[\s,.!?…;:\-]+".join(re.escape(w) for w in words) + r"\b",
+                re.UNICODE | re.IGNORECASE)
+            RU_PHRASES.append((pat, list(emos)))
+
+
+_add_ru_phrase("больше_не_был|больше_не_было|больше_не_стало|его_не_стало"
+               " её_не_стало|её_больше_не", "sad")
+_add_ru_phrase("сердце_разбил|сердце_разбито|разбитое_сердц", "sad")
+_add_ru_phrase("ни_жив ни_мёртв", "fear")
+_add_ru_phrase("чёрт_возьми|дьявол_побери|чтоб_тебя", "angry")
+_add_ru_phrase("ну_конечно|вот_молодец|опять_ты|как_обычно", "ironic")
+
 
 CAPITAL_WORD = re.compile(r"\b[A-ZА-Я]{3,}\b")
 EXCLAIM = re.compile(r"[!！]{1,}")
@@ -175,6 +201,16 @@ def analyze_rules(text: str, prev_emotion: str | None = None) -> EmotionProfile:
             scores[emo] += 1.0
     lex_hits = sum(scores[e] for e in EMOTIONS) - 0.15 * len(EMOTIONS)
 
+    # multi-word Russian phrases ("больше не было" -> sadness)
+    low_text = text.lower()
+    phrase_hits = 0
+    for pat, emos in RU_PHRASES:
+        if pat.search(low_text):
+            phrase_hits += 1
+            for emo in emos:
+                scores[emo] += 1.5
+    lex_hits += 1.5 * phrase_hits
+
     # punctuation cues
     if EXCLAIM.search(text):
         ex_count = len(EXCLAIM.findall(text))
@@ -194,6 +230,9 @@ def analyze_rules(text: str, prev_emotion: str | None = None) -> EmotionProfile:
         scores["excited"] += 0.6
     if DIALOGUE.search(text):
         scores["ironic"] += 0.35  # spoken lines often carry attitude
+    # Russian-style dialogue dashes: line starting with «— » after a quote/period
+    if re.search(r"(?:^|[.!?…]\s)\s*—\s+\S", text):
+        scores["ironic"] += 0.2
 
     # short punchy sentences feel excited/angry; long flowing ones tender/mysterious
     words_per_sent = n / max(len(re.findall(r"[.!?…]+", text)), 1)
@@ -217,7 +256,7 @@ def analyze_rules(text: str, prev_emotion: str | None = None) -> EmotionProfile:
     reasons = []
     if lex_hits >= 0.5:
         top_words = [t for t in toks if _lex_score(t)][:4]
-        reasons.append("лексика: " + ", ".join(top_words))
+        reasons.append("лексика: " + (", ".join(top_words) or "фразы"))
     if EXCLAIM.search(text):
         reasons.append("восклицания")
     if CAPITAL_WORD.search(text):

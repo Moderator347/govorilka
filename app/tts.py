@@ -8,6 +8,9 @@ signal-level prosody to the neutral synthesis:
   * tremolo       - slow amplitude modulation (sad / fear quiver)
   * vibrato       - periodic pitch wobble (irony, excitement)
 
+The default voice speaks RUSSIAN (Piper model ru_RU-denis-medium); see
+DEFAULT_VOICE below for how the model is resolved / auto-downloaded.
+
 Memory safety: long passages are synthesized sentence-by-sentence and every
 DSP pass processes at most `_CHUNK` samples at a time. Without this, one very
 long paragraph could allocate gigabytes in resample/WSOLA and OOM-kill the
@@ -21,6 +24,7 @@ import math
 import os
 import re
 import threading
+import urllib.request
 import wave
 
 import numpy as np
@@ -30,10 +34,13 @@ from .emotion import EmotionProfile
 
 log = logging.getLogger("emo-reader.tts")
 
-MODEL_PATH = os.environ.get(
-    "PIPER_MODEL",
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                 "models", "en_US-lessac-medium.onnx"))
+MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "models")
+
+# Default voice: Russian male "Denis" (Piper, CC-BY-licensed).
+DEFAULT_VOICE = os.environ.get("PIPER_VOICE", "ru_RU-denis-medium")
+# Fallback voices tried in order if the default can't be loaded/downloaded.
+_FALLBACK_VOICES = ["ru_RU-dmitri-medium", "en_US-lessac-medium"]
 
 # Max samples processed per DSP block (~20 s @ 22 kHz, float32 ≈ 1.8 MB/block)
 _CHUNK = int(22050 * 20.0)
@@ -44,13 +51,84 @@ _voice = None
 _lock = threading.Lock()
 
 
+# ---------------------------------------------------------------------------
+# Voice resolution (Russian by default, auto-download of missing models)
+# ---------------------------------------------------------------------------
+
+_HF_BASE = ("https://huggingface.co/rhasspy/piper-voices/resolve/main/"
+            "{family}/{region}/{name}/{quality}/{key}{ext}?download=true")
+
+
+def _is_local_path(spec: str) -> bool:
+    return spec.endswith(".onnx") or os.sep in spec
+
+
+def _download_voice(key: str) -> str | None:
+    """Download `<key>.onnx` + `<key>.onnx.json` into MODELS_DIR.
+
+    Uses the official piper downloader when available; falls back to direct
+    HuggingFace URLs otherwise. Returns the .onnx path or None.
+    """
+    target_onnx = os.path.join(MODELS_DIR, key + ".onnx")
+    if os.path.exists(target_onnx):
+        return target_onnx
+    try:
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        try:
+            from piper.download_voices import download_voice
+            download_voice(key, MODELS_DIR)
+        except ImportError:
+            m = re.match(r"^(\w\w)_((\w\w)_)?([\w]+)-([\w-]+)$", key)
+            if not m:
+                raise RuntimeError(f"неизвестное имя голоса: {key}")
+            family, region = m.group(1), m.group(3) or "US"
+            name, quality = m.group(4), m.group(5)
+            for ext in (".onnx", ".onnx.json"):
+                url = _HF_BASE.format(family=family, region=region, name=name,
+                                      quality=quality, key=key, ext=ext)
+                dst = os.path.join(MODELS_DIR, key + ext)
+                log.info("скачиваю модель %s ...", key + ext)
+                urllib.request.urlretrieve(url, dst)
+        return target_onnx if os.path.exists(target_onnx) else None
+    except Exception:
+        log.exception("не удалось скачать голос %s", key)
+        return None
+
+
+def resolve_model_path() -> str:
+    """Find (or fetch) the ONNX model for the configured voice."""
+    candidates = [DEFAULT_VOICE] + [v for v in _FALLBACK_VOICES
+                                    if v != DEFAULT_VOICE]
+    for spec in candidates:
+        if _is_local_path(spec):
+            path = spec if os.path.isabs(spec) else os.path.join(MODELS_DIR,
+                                                                 os.path.basename(spec))
+            if not os.path.exists(path):
+                # PIPER_VOICE may point at a missing local file - try downloading
+                # the model with the same base name before giving up.
+                base = os.path.splitext(os.path.basename(spec))[0]
+                path = _download_voice(base) or path
+        else:
+            path = os.path.join(MODELS_DIR, spec + ".onnx")
+            if not os.path.exists(path):
+                path = _download_voice(spec) or path
+        if os.path.exists(path):
+            return path
+    raise FileNotFoundError(
+        f"Не найдена TTS-модель для голоса «{DEFAULT_VOICE}». "
+        f"Скачайте её в каталог models/ или укажите переменную окружения "
+        f"PIPER_VOICE (имя голоса Piper или путь к файлу .onnx).")
+
+
 def get_voice():
     global _voice
     if _voice is None:
         with _lock:
             if _voice is None:
                 from piper.voice import PiperVoice
-                _voice = PiperVoice.load(MODEL_PATH)
+                path = resolve_model_path()
+                log.info("загружаю голос: %s", os.path.basename(path))
+                _voice = PiperVoice.load(path)
     return _voice
 
 
