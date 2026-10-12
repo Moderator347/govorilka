@@ -7,12 +7,18 @@ frontend streams playback and shows the current text with its emotion badge.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import os
+import re
 import shutil
+import subprocess
+import tempfile
 import time
 import uuid
+import wave
+import zipfile
 from dataclasses import asdict
 from pathlib import Path
 
@@ -65,10 +71,24 @@ class BookState:
             p.emotion = m["emotion"]
             p.confidence = m.get("confidence", 0.5)
             p.reason = m.get("reason", "")
-            p.audio = m.get("audio", f"{p.index}.wav")
+            p.audio = m.get("audio", f"{p.index}.mp3")
             p.duration = m.get("duration", 0.0)
         self.status = saved.get("status", "ready")
         self.progress = 1.0
+
+    def audio_file(self, index: int) -> Path | None:
+        """Path to the stored audio of a passage (prefers .mp3, falls back to .wav)."""
+        p = self.book.passages[index]
+        fname = getattr(p, "audio", None)
+        if fname:
+            path = self.dir / fname
+            if path.exists():
+                return path
+        for cand in (f"{index}.mp3", f"{index}.wav"):
+            path = self.dir / cand
+            if path.exists():
+                return path
+        return None
 
     def save_meta(self):
         metas = []
@@ -89,9 +109,10 @@ REGISTRY: dict[str, BookState] = {}
 
 def load_existing_books():
     for d in sorted(DATA_DIR.iterdir()):
-        if d.is_dir() and (d / "meta.json").exists() and (d / "source").exists():
+        src = next((p for p in d.glob("source*") if p.is_file()), None)
+        if d.is_dir() and (d / "meta.json").exists() and src is not None:
             try:
-                b = books_mod.load_book(str(d / "source"), MAX_PASSAGES)
+                b = books_mod.load_book(str(src), MAX_PASSAGES)
                 b.id = d.name
                 st = BookState(b)
                 REGISTRY[b.id] = st
@@ -117,7 +138,7 @@ def book_json(st: BookState) -> dict:
             "emotion": getattr(p, "emotion", None),
             "confidence": getattr(p, "confidence", None),
             "reason": getattr(p, "reason", ""),
-            "ready": getattr(p, "audio", None) is not None,
+            "ready": st.audio_file(p.index) is not None,
             "duration": getattr(p, "duration", 0.0),
         })
     return {
@@ -132,7 +153,9 @@ def book_json(st: BookState) -> dict:
 # ---------------------------------------------------------------------------
 # Processing pipeline (analyze + synthesize sequentially in a worker thread)
 # ---------------------------------------------------------------------------
-import io  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
 
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
@@ -174,7 +197,7 @@ def _process_book_inner(st: BookState):
         prev_emo = prof.emotion
         wav_bytes = synthesize_emotional(p.text, prof)
         out_name = f"{p.index}.mp3"
-        _wav_to_mp3(wav_bytes, st.dir / out_name)
+        _encode_mp3(wav_bytes, st.dir / out_name)
         p.emotion = prof.emotion
         p.confidence = prof.confidence
         p.reason = prof.reason
@@ -191,15 +214,105 @@ def _process_book_inner(st: BookState):
 
 
 def _wav_duration(wav_bytes: bytes) -> float:
-    import wave
     with wave.open(io.BytesIO(wav_bytes), "rb") as w:
         return w.getnframes() / float(w.getframerate())
 
 
-def _wav_to_mp3(wav_bytes: bytes, out_path: Path):
+# ---------------------------------------------------------------------------
+# MP3 export
+# ---------------------------------------------------------------------------
+MP3_BITRATE = os.environ.get("MP3_BITRATE", "48k")   # speech-friendly
+
+# Encoder preference order (resolved once at first use):
+#   1. pydub + ffmpeg - best quality, already a project dependency;
+#   2. bare ffmpeg CLI - works even if pydub/its audioop shim is broken on
+#      this Python (audioop was removed in 3.13);
+#   3. lameenc - pure pip install of LAME bindings, no system binaries needed.
+_MP3_ENCODER: str | None = None
+
+
+def _have_ffmpeg() -> bool:
+    return shutil.which("ffmpeg") is not None
+
+
+def _lame_available() -> bool:
+    try:
+        import lameenc  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _encode_mp3_pydub(wav_bytes: bytes, out_path: Path) -> None:
     from pydub import AudioSegment
     seg = AudioSegment.from_file(io.BytesIO(wav_bytes), format="wav")
-    seg.export(str(out_path), format="mp3", bitrate="48k")
+    seg.export(str(out_path), format="mp3", bitrate=MP3_BITRATE)
+
+
+def _encode_mp3_ffmpeg(wav_bytes: bytes, out_path: Path) -> None:
+    fd, tmp_wav = tempfile.mkstemp(suffix=".wav")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(wav_bytes)
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_wav,
+             "-codec:a", "libmp3lame", "-b:a", MP3_BITRATE, str(out_path)],
+            capture_output=True, timeout=300)
+        if r.returncode != 0 or not out_path.exists():
+            raise RuntimeError(
+                "ffmpeg mp3 encode failed: " + r.stderr.decode(errors="replace")[:200])
+    finally:
+        if os.path.exists(tmp_wav):
+            os.unlink(tmp_wav)
+
+
+def _encode_mp3_lameenc(wav_bytes: bytes, out_path: Path) -> None:
+    import lameenc
+    with wave.open(io.BytesIO(wav_bytes), "rb") as w:
+        assert w.getnchannels() == 1 and w.getsampwidth() == 2, "expected mono 16-bit wav"
+        sr = w.getframerate()
+        pcm = w.readframes(w.getnframes())
+    enc = lameenc.Encoder()
+    enc.set_bit_rate(int(MP3_BITRATE.rstrip("k")))
+    enc.set_in_sample_rate(sr)
+    enc.set_channels(1)
+    enc.set_quality(2)                     # 2 = high quality
+    data = enc.encode(pcm) + enc.flush()
+    if not data:
+        raise RuntimeError("lameenc produced no output")
+    out_path.write_bytes(data)
+
+
+def _encode_mp3(wav_bytes: bytes, out_path: Path) -> None:
+    """Encode mono 16-bit WAV bytes to an MP3 file using the best encoder."""
+    global _MP3_ENCODER
+    if _MP3_ENCODER is None:
+        for name, fn in (("pydub", _encode_mp3_pydub),
+                         ("ffmpeg", _encode_mp3_ffmpeg),
+                         ("lameenc", _encode_mp3_lameenc)):
+            if name in ("pydub", "ffmpeg") and not _have_ffmpeg():
+                continue
+            if name == "lameenc" and not _lame_available():
+                continue
+            try:
+                fn(wav_bytes, out_path)
+                _MP3_ENCODER = name
+                log.info("mp3 encoder: %s", name)
+                return
+            except Exception:
+                log.warning("mp3 encoder %s unavailable, trying next", name)
+        raise HTTPException(500, "Не найден MP3-энкодер (нужен ffmpeg или пакет lameenc)")
+
+    fn = {"pydub": _encode_mp3_pydub,
+          "ffmpeg": _encode_mp3_ffmpeg,
+          "lameenc": _encode_mp3_lameenc}[_MP3_ENCODER]
+    try:
+        fn(wav_bytes, out_path)
+    except Exception:
+        # one-shot fallback chain if the cached encoder suddenly fails
+        log.exception("mp3 encode via %s failed, re-probing encoders", _MP3_ENCODER)
+        _MP3_ENCODER = None
+        _encode_mp3(wav_bytes, out_path)
 
 
 # ---------------------------------------------------------------------------
@@ -271,15 +384,80 @@ def get_audio(book_id: str, index: int):
     st = get_state(book_id)
     if index < 0 or index >= len(st.book.passages):
         raise HTTPException(404, "Фрагмент не найден")
-    p = st.book.passages[index]
-    fname = getattr(p, "audio", None)
-    if not fname:
+    path = st.audio_file(index)
+    if path is None:
+        if getattr(st.book.passages[index], "audio", None):
+            raise HTTPException(404, "Файл аудио потерян")
         raise HTTPException(425, "Аудио ещё не готово")
-    path = st.dir / fname
-    if not path.exists():
-        raise HTTPException(404, "Файл аудио потерян")
-    return FileResponse(path, media_type="audio/mpeg",
+    media = "audio/mpeg" if path.suffix == ".mp3" else "audio/wav"
+    return FileResponse(path, media_type=media,
                         headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/books/{book_id}/download")
+def download_book_mp3(book_id: str):
+    """Export the whole book as a single continuous MP3 file."""
+    st = get_state(book_id)
+    paths = [st.audio_file(i) for i in range(len(st.book.passages))]
+    paths = [p for p in paths if p is not None]
+    if not paths:
+        raise HTTPException(425, "Аудио ещё не готово")
+
+    # cache the assembled export next to the clips
+    out = st.dir / "full.mp3"
+    ready_sec = sum(getattr(p, "duration", 0.0) for p in st.book.passages
+                    if st.audio_file(p.index) is not None)
+    expected_lo = ready_sec * int(MP3_BITRATE.rstrip("k")) * 125 * 0.8   # -20% slack
+    if not (out.exists() and out.stat().st_size >= max(expected_lo, 1024)):
+        tmp = out.with_suffix(".part.mp3")
+        try:
+            _concat_mp3(paths, tmp)
+            tmp.replace(out)
+        except Exception:
+            log.exception("full-book mp3 export failed")
+            if tmp.exists():
+                tmp.unlink()
+            # fall back to zipping individual clips
+            zip_path = st.dir / "full.zip"
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
+                for p in paths:
+                    z.write(p, p.name)
+            return FileResponse(zip_path, media_type="application/zip",
+                                filename=_safe_filename(st.book.title) + ".zip")
+
+    name = _safe_filename(st.book.title) + ".mp3"
+    return FileResponse(out, media_type="audio/mpeg", filename=name,
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+def _safe_filename(title: str) -> str:
+    name = re.sub(r"[^\w\s\-]", "", title, flags=re.UNICODE).strip()
+    name = re.sub(r"\s+", "_", name)[:80] or "book"
+    return name
+
+
+def _first_sync(data: bytes) -> int:
+    """Skip ID3v2 tags / padding, return offset of the first MPEG audio frame."""
+    i = 0
+    while data[i:i + 3] == b"ID3" and i + 10 <= len(data):
+        size = ((data[6] & 0x7F) << 21 | (data[7] & 0x7F) << 14 |
+                (data[8] & 0x7F) << 7 | (data[9] & 0x7F))
+        i += 10 + size
+    n = len(data)
+    while i < n - 1:
+        if data[i] == 0xFF and (data[i + 1] & 0xE0) == 0xE0:
+            return i
+        i += 1
+    return i
+
+
+def _concat_mp3(paths: list[Path], out_path: Path) -> None:
+    """Concatenate mono 48k MP3 clips into one MP3 (byte-level frame copy)."""
+    with open(out_path, "wb") as out:
+        for p in paths:
+            data = p.read_bytes()
+            start = _first_sync(data)
+            out.write(data[start:])
 
 
 @app.delete("/api/books/{book_id}")
