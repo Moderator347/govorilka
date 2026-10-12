@@ -157,6 +157,10 @@ from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
 
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
+
 
 def _process_book_safe(st: BookState):
     """Run synthesis; on any failure mark error but keep partial results.
