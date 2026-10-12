@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unicodedata
+import urllib.parse
 import uuid
 import wave
 import zipfile
@@ -422,18 +424,57 @@ def download_book_mp3(book_id: str):
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_STORED) as z:
                 for p in paths:
                     z.write(p, p.name)
-            return FileResponse(zip_path, media_type="application/zip",
-                                filename=_safe_filename(st.book.title) + ".zip")
+            return _attachment(zip_path, _safe_filename(st.book.title) + ".zip",
+                               "application/zip")
 
-    name = _safe_filename(st.book.title) + ".mp3"
-    return FileResponse(out, media_type="audio/mpeg", filename=name,
-                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    return _attachment(out, _safe_filename(st.book.title) + ".mp3", "audio/mpeg")
 
 
 def _safe_filename(title: str) -> str:
+    """ASCII-safe download name via romanization (RFC 5987 carries the unicode one)."""
     name = re.sub(r"[^\w\s\-]", "", title, flags=re.UNICODE).strip()
     name = re.sub(r"\s+", "_", name)[:80] or "book"
-    return name
+    return _romanize(name)
+
+
+# Cyrillic -> Latin transliteration table (for HTTP fallback filenames)
+_VOWELS = {"а": "a", "е": "e", "ё": "yo", "и": "i", "о": "o", "у": "u",
+           "ы": "y", "э": "e", "ю": "yu", "я": "ya"}
+_CONS = {"б": "b", "в": "v", "г": "g", "д": "d", "ж": "zh", "з": "z",
+         "й": "y", "к": "k", "л": "l", "м": "m", "н": "n", "п": "p",
+         "р": "r", "с": "s", "т": "t", "ф": "f", "х": "kh", "ц": "ts",
+         "ч": "ch", "ш": "sh", "щ": "shch", "ъ": "", "ь": ""}
+
+
+def _romanize(text: str) -> str:
+    out = []
+    for ch in text.lower():
+        if ch in _VOWELS:
+            out.append(_VOWELS[ch])
+        elif ch in _CONS:
+            out.append(_CONS[ch])
+        else:
+            out.append(ch)
+    s = "".join(out)
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode()
+    return s or "book"
+
+
+def _content_disposition(filename: str) -> str:
+    """RFC 5987 Content-Disposition value safe for non-latin (Cyrillic) names.
+
+    HTTP headers are encoded as latin-1, so raw Cyrillic filenames raise
+    UnicodeEncodeError inside starlette. We provide an ASCII fallback plus
+    the UTF-8 percent-encoded name in filename*.
+    """
+    ascii_name = filename.encode("ascii", "ignore").decode() or "book"
+    quoted = urllib.parse.quote(filename, safe="")
+    return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"
+
+
+def _attachment(path: Path, filename: str, media_type: str) -> FileResponse:
+    return FileResponse(path, media_type=media_type,
+                        headers={"Content-Disposition": _content_disposition(filename)})
 
 
 def _first_sync(data: bytes) -> int:
