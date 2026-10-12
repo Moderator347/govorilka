@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+piper-tts>=1.2
+numpy>=1.26
+scipy>=1.11
+EbookLib>=0.18
+lxml>=5.0
+pydub>=0.25
